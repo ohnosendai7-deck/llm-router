@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-router"
+version = "0.1.0"
+description = "Local OpenAI-compatible and Anthropic-compatible LLM router and key-injecting gateway"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "CC0-1.0"}
+authors = [
+  {name = "Ono-Sendai Cyberspace 7", email = "ohnosendai@proton.me"}
+]
+dependencies = []
+
+[project.scripts]
+llm-router = "llm_router.cli:main"
+api-proxy = "llm_router.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["llm_router*"]
