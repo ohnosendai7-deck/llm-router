@@ -248,14 +248,24 @@ class RouterRequestHandler(BaseHTTPRequestHandler):
             for k, v in result.headers.items():
                 if k.lower() not in ("content-length", "transfer-encoding", "connection"):
                     self.send_header(k, v)
-            self.send_header("Connection", "close")
+            self.send_header("Transfer-Encoding", "chunked")
+            conn_hdr = (self.headers.get("Connection") or "").lower()
+            if conn_hdr == "close":
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            else:
+                self.send_header("Connection", "keep-alive")
             self.end_headers()
             self.wfile.flush()
-            self.close_connection = True
             for chunk in result.stream_chunks:
                 if chunk:
+                    header_line = f"{len(chunk):X}\r\n".encode("ascii")
+                    self.wfile.write(header_line)
                     self.wfile.write(chunk)
+                    self.wfile.write(b"\r\n")
                     self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
             return
 
         body = result.body or b""

@@ -192,6 +192,7 @@ def build_upstream_headers(
     if api_key:
         if protocol == "anthropic":
             headers["x-api-key"] = api_key
+            headers["Authorization"] = f"Bearer {api_key}"
             headers["anthropic-version"] = "2023-06-01"
         else:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -222,7 +223,7 @@ class UpstreamResponse:
             return
         try:
             while True:
-                chunk = self._resp.read(chunk_size)
+                chunk = self._resp.read1(chunk_size)
                 if not chunk:
                     break
                 yield chunk
@@ -275,7 +276,10 @@ def request_upstream(
 ) -> UpstreamResponse:
     """Send an HTTP/HTTPS request to an upstream provider and return `UpstreamResponse`."""
     scheme, host, port, base_path = parse_upstream_endpoint(upstream)
-    full_path = f"{base_path}{url_path}" if base_path else url_path
+    up_path = url_path if url_path.startswith("/") else "/" + url_path
+    if base_path.endswith("/v1") and (up_path == "/v1" or up_path.startswith("/v1/")):
+        up_path = up_path[3:] or "/"
+    full_path = f"{base_path}{up_path}" if base_path else up_path
     if not full_path.startswith("/"):
         full_path = "/" + full_path
 

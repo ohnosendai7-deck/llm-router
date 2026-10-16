@@ -655,6 +655,82 @@ class TestRouterEndToEnd(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(raw)["completion"], "LEGACY-OK")
 
+    def test_kimi_coding_provider_scoped_anthropic_and_pi_models(self) -> None:
+        # Verify the exact kimi-coding config from dwi/services/api-proxy.scm works for
+        # Claude Code (`POST /kimi-coding/v1/messages` with `fast`, `max`, and `glm` fan-out)
+        sexp = f"""
+        (api-proxy
+         (disabled #f)
+         (port 0)
+         (providers
+          (kimi (upstream "http://127.0.0.1:{self.upstream_port}")
+                (key "sk-kimi")
+                (models
+                 (k3 (overrides (model . "kimi-k3")))))
+          (kimi-coding
+           (upstream "http://127.0.0.1:{self.upstream_port}")
+           (path "/coding")
+           (key "sk-kimi-coding")
+           (models
+            (fast (overrides (model . "kimi-k2-turbo")))
+            (max  (overrides (model . "k3") (thinking . "max")))
+            (glm  (overrides (model . "glm-5"))
+                  (upstream "http://127.0.0.1:{self.upstream_port}")
+                  (path "/anthropic")
+                  (key "sk-glm-real"))))))
+        """
+        cfg = parse_config_sexp(sexp)
+        srv = create_server(cfg, host="127.0.0.1", port=0)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            # 1. Verify GET /kimi/v1/models includes all 5 models from config/pi/models.json
+            req = Request(
+                f"http://127.0.0.1:{port}/kimi/v1/models",
+                headers={"Authorization": "Bearer local-pi"},
+                method="GET",
+            )
+            with urlopen(req, timeout=10) as resp:
+                ids = [m["id"] for m in json.loads(resp.read())["data"]]
+                for expected_id in ("k3", "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"):
+                    self.assertIn(expected_id, ids)
+
+            # 2. POST /kimi-coding/v1/messages with model="fast" -> /coding/v1/messages
+            req = Request(
+                f"http://127.0.0.1:{port}/kimi-coding/v1/messages",
+                data=json.dumps(
+                    {"model": "fast", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]}
+                ).encode("utf-8"),
+                headers={"Authorization": "Bearer local-claude", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+                self.assertEqual(data["received_path"], "/coding/v1/messages")
+                self.assertEqual(data["received_auth"], "Bearer sk-kimi-coding")
+                self.assertEqual(data["received_x_api_key"], "sk-kimi-coding")
+                self.assertEqual(data["received_body"]["model"], "kimi-k2-turbo")
+
+            # 3. POST /kimi-coding/v1/messages with model="glm" -> /anthropic/v1/messages with sk-glm-real
+            req = Request(
+                f"http://127.0.0.1:{port}/kimi-coding/v1/messages",
+                data=json.dumps(
+                    {"model": "glm", "max_tokens": 64, "messages": [{"role": "user", "content": "hi glm"}]}
+                ).encode("utf-8"),
+                headers={"x-api-key": "local-claude", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+                self.assertEqual(data["received_path"], "/anthropic/v1/messages")
+                self.assertEqual(data["received_auth"], "Bearer sk-glm-real")
+                self.assertEqual(data["received_x_api_key"], "sk-glm-real")
+                self.assertEqual(data["received_body"]["model"], "glm-5")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

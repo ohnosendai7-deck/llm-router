@@ -209,9 +209,24 @@ class ResolvedTarget:
     def upstream_url_path(self) -> str:
         prefix = (self.path_prefix or "").rstrip("/")
         sub = self.subpath if self.subpath.startswith("/") else "/" + self.subpath
-        # Avoid duplicating `/anthropic` if both provider path_prefix and subpath have it
+        # Normalize bare endpoint subpaths when client base_url omitted `/v1`
+        bare_v1_endpoints = (
+            "/chat/completions",
+            "/completions",
+            "/embeddings",
+            "/responses",
+            "/models",
+            "/messages",
+            "/messages/count_tokens",
+            "/complete",
+        )
+        if sub in bare_v1_endpoints or sub.startswith("/models/"):
+            sub = "/v1" + sub
+        # Avoid duplicating `/anthropic` or `/v1` if both provider path_prefix and subpath have it
         if prefix.endswith("/anthropic") and sub.startswith("/anthropic/"):
             sub = sub[len("/anthropic"):]
+        if prefix.endswith("/v1") and (sub == "/v1" or sub.startswith("/v1/")):
+            sub = sub[3:] or "/"
         full = f"{prefix}{sub}" if prefix else sub
         if self.query:
             return f"{full}?{self.query}"
@@ -231,25 +246,29 @@ def resolve_target(
 
     # Anthropic endpoint resolution
     if classification.protocol == "anthropic":
-        # Check if a specific Anthropic-capable provider was requested and exists
+        # Check if a specific provider was requested in the URL (e.g. /kimi-coding/v1/messages
+        # or /kimi-anthropic/v1/messages or /anthropic/v1/messages).
         if classification.provider_hint:
             prov = config.get_provider(classification.provider_hint)
-            if (
-                prov
-                and (prov.protocol == "anthropic" or (prov.path or "").rstrip("/").endswith("/anthropic"))
-                and not prov.mock
-                and not prov.is_placeholder_key
-                and prov.upstream
-            ):
-                if req_model:
-                    m = prov.find_model(req_model)
+            if prov and not prov.mock and not prov.is_placeholder_key and prov.upstream:
+                # If the subpath itself was `/anthropic/v1/messages` under an OpenAI-only
+                # provider (e.g. `/kimi/anthropic/v1/messages` where `kimi` has path=""),
+                # only forward if the provider or matched model is configured for Anthropic/custom path.
+                m = prov.find_model(req_model) if req_model else None
+                explicit_sub_anthropic = classification.subpath.startswith("/anthropic/")
+                prov_supports_anthropic = (
+                    prov.protocol == "anthropic"
+                    or bool(prov.path)
+                    or (m is not None and (m.protocol == "anthropic" or bool(m.path) or bool(m.upstream)))
+                )
+                if not explicit_sub_anthropic or prov_supports_anthropic:
                     if m is not None:
                         return _build_resolved_from_model(
                             prov, m, req_model, parsed_body, classification.subpath, query, protocol="anthropic"
                         )
-                return _build_resolved_from_provider(
-                    prov, req_model, parsed_body, classification.subpath, query, protocol="anthropic"
-                )
+                    return _build_resolved_from_provider(
+                        prov, req_model, parsed_body, classification.subpath, query, protocol="anthropic"
+                    )
         # Check if any model entry matches req_model on an anthropic-capable provider
         if req_model:
             for prov in config.providers:
@@ -549,19 +568,21 @@ def build_openai_models_catalog(
                 root=m.target_model,
             )
 
-    # 2. For unmanaged providers (no `models` block), expose standard defaults
-    # so `GET /<unmanaged>/v1/models` always has valid model entries even without
-    # hitting the network.
+    # 2. Expose standard provider models (e.g. Moonshot models referenced by
+    # config/pi/models.json) alongside configured aliases so `GET /<provider>/v1/models`
+    # and `GET /v1/models` include both preset aliases (`k3`) and direct model IDs
+    # (`kimi-k3`, `kimi-k2.7-code`, etc.).
     for prov in ordered_providers:
-        if not prov.models and not prov.is_placeholder_key:
+        if not prov.is_placeholder_key:
             if prov.name in ("kimi", "code") or "moonshot" in prov.upstream or "kimi" in prov.upstream:
                 for mid in ("k3", "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"):
                     add_model_entry(mid, prov.name, root="kimi-k3" if mid == "k3" else mid)
-            elif prov.name == "openrouter" or "openrouter" in prov.upstream:
-                add_model_entry("argon", prov.name, root="google/gemini-4-argon")
-                add_model_entry("google/gemini-4-argon", prov.name)
-            else:
-                add_model_entry(f"{prov.name}-default", prov.name)
+            elif not prov.models:
+                if prov.name == "openrouter" or "openrouter" in prov.upstream:
+                    add_model_entry("argon", prov.name, root="google/gemini-4-argon")
+                    add_model_entry("google/gemini-4-argon", prov.name)
+                else:
+                    add_model_entry(f"{prov.name}-default", prov.name)
 
     # 3. Include mock Anthropic models on the unified catalog
     if provider_hint is None and config.mock_anthropic:
